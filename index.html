@@ -1,0 +1,490 @@
+import { useState, useCallback } from "react";
+import * as XLSX from "xlsx";
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+const uid = () => Math.random().toString(36).slice(2);
+const newSite = () => ({ id: uid(), nom: "", adresse: "", statutSite: "À confirmer", budgetAnnuel: "", interlocuteurs: [] });
+const newInter = () => ({ id: uid(), nom: "", poste: "", email: "", telephone: "", statut: "En cours" });
+const newAgence = () => ({ id: uid(), nom: "", refAC: "", sites: [] });
+
+const STATUS_SITE  = ["Connu ✓", "À confirmer", "Inconnu"];
+const STATUS_INTER = ["Identifié ✓", "En cours", "Non identifié"];
+
+const S = {
+  "Connu ✓":       { fg: "#22c55e", bg: "#052e16", dot: "#22c55e" },
+  "À confirmer":   { fg: "#fbbf24", bg: "#1c1400", dot: "#fbbf24" },
+  "Inconnu":       { fg: "#f87171", bg: "#1c0a0a", dot: "#f87171" },
+  "Identifié ✓":   { fg: "#22c55e", bg: "#052e16", dot: "#22c55e" },
+  "En cours":      { fg: "#fbbf24", bg: "#1c1400", dot: "#fbbf24" },
+  "Non identifié": { fg: "#f87171", bg: "#1c0a0a", dot: "#f87171" },
+};
+
+// ─── Subcomponents ───────────────────────────────────────────────────────────
+const Pill = ({ label }) => {
+  const s = S[label] || { fg: "#9ca3af", bg: "#1a1a1a" };
+  return (
+    <span style={{ fontSize: 11, padding: "3px 9px", borderRadius: 20, background: s.bg, color: s.fg, border: `1px solid ${s.fg}40`, fontFamily: "monospace", whiteSpace: "nowrap", letterSpacing: 0.3 }}>
+      <span style={{ marginRight: 5 }}>●</span>{label}
+    </span>
+  );
+};
+
+const Field = ({ label, value, onChange, placeholder, type = "text", small }) => (
+  <div style={{ display: "flex", flexDirection: "column", gap: 3, flex: 1, minWidth: 100 }}>
+    {label && <span style={{ fontSize: 10, letterSpacing: 2, color: "#4b5563", textTransform: "uppercase", fontFamily: "monospace" }}>{label}</span>}
+    <input
+      type={type} value={value} placeholder={placeholder}
+      onChange={e => onChange(e.target.value)}
+      style={{ background: "#0d1117", border: "1px solid #1f2937", borderRadius: 6, padding: small ? "5px 9px" : "8px 11px", color: "#e5e7eb", fontSize: small ? 12 : 13, outline: "none", fontFamily: "Georgia, serif", width: "100%", boxSizing: "border-box" }}
+    />
+  </div>
+);
+
+const DropField = ({ label, value, onChange, options, small }) => {
+  const s = S[value] || {};
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3, flex: 1, minWidth: 120 }}>
+      {label && <span style={{ fontSize: 10, letterSpacing: 2, color: "#4b5563", textTransform: "uppercase", fontFamily: "monospace" }}>{label}</span>}
+      <select value={value} onChange={e => onChange(e.target.value)}
+        style={{ background: s.bg || "#0d1117", border: `1px solid ${s.fg ? s.fg + "50" : "#1f2937"}`, borderRadius: 6, padding: small ? "5px 9px" : "8px 11px", color: s.fg || "#e5e7eb", fontSize: small ? 12 : 13, fontFamily: "monospace", cursor: "pointer", outline: "none" }}>
+        {options.map(o => <option key={o} value={o} style={{ background: "#0d1117", color: S[o]?.fg || "#e5e7eb" }}>{o}</option>)}
+      </select>
+    </div>
+  );
+};
+
+function KPI({ label, value, sub, color = "#6366f1" }) {
+  return (
+    <div style={{ background: "#0d1117", border: "1px solid #1f2937", borderRadius: 10, padding: "12px 18px", textAlign: "center", minWidth: 100 }}>
+      <div style={{ fontSize: 24, fontWeight: "bold", color, lineHeight: 1.1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 10, color: color + "80", fontFamily: "monospace", marginBottom: 2 }}>{sub}</div>}
+      <div style={{ fontSize: 10, color: "#4b5563", fontFamily: "monospace", textTransform: "uppercase", letterSpacing: 1 }}>{label}</div>
+    </div>
+  );
+}
+
+// ─── Interlocuteur Row ───────────────────────────────────────────────────────
+function InterRow({ inter, onChange, onDel }) {
+  return (
+    <div style={{ background: "#060a12", border: "1px solid #1f2937", borderRadius: 8, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <Field small label="Nom" value={inter.nom} onChange={v => onChange({ ...inter, nom: v })} placeholder="Jean Dupont" />
+        <Field small label="Poste" value={inter.poste} onChange={v => onChange({ ...inter, poste: v })} placeholder="Responsable achats" />
+        <DropField small label="Statut" value={inter.statut} onChange={v => onChange({ ...inter, statut: v })} options={STATUS_INTER} />
+        <button onClick={onDel} style={{ background: "#1c0a0a", border: "1px solid #f8717130", borderRadius: 6, padding: "5px 10px", color: "#f87171", cursor: "pointer", fontSize: 11, alignSelf: "flex-end" }}>✕</button>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Field small label="Email" type="email" value={inter.email} onChange={v => onChange({ ...inter, email: v })} placeholder="jean@agence.com" />
+        <Field small label="Téléphone" value={inter.telephone} onChange={v => onChange({ ...inter, telephone: v })} placeholder="+33 6 …" />
+      </div>
+    </div>
+  );
+}
+
+// ─── Site Card ───────────────────────────────────────────────────────────────
+function SiteCard({ site, idx, onChange, onDel }) {
+  const [open, setOpen] = useState(true);
+  const upInter = (i, val) => { const a = [...site.interlocuteurs]; a[i] = val; onChange({ ...site, interlocuteurs: a }); };
+  const addInter = () => onChange({ ...site, interlocuteurs: [...site.interlocuteurs, newInter()] });
+  const delInter = i => onChange({ ...site, interlocuteurs: site.interlocuteurs.filter((_, j) => j !== i) });
+  const ok = site.interlocuteurs.filter(x => x.statut === "Identifié ✓").length;
+
+  return (
+    <div style={{ border: "1px solid #1f2937", borderRadius: 10, overflow: "hidden", background: "#080c14" }}>
+      <div onClick={() => setOpen(o => !o)} style={{ padding: "11px 14px", background: "#0d1520", display: "flex", alignItems: "center", gap: 12, cursor: "pointer", userSelect: "none" }}>
+        <span style={{ color: "#4b5563", fontSize: 14 }}>{open ? "▾" : "▸"}</span>
+        <div style={{ flex: 1 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ fontFamily: "Georgia, serif", fontSize: 14, color: "#e5e7eb" }}>{site.nom || `Site ${idx + 1}`}</span>
+            <Pill label={site.statutSite} />
+            {site.adresse && <span style={{ fontSize: 11, color: "#4b5563" }}>📍 {site.adresse}</span>}
+          </div>
+          <div style={{ fontSize: 11, color: "#374151", fontFamily: "monospace", marginTop: 2 }}>
+            {site.interlocuteurs.length} interlocuteur{site.interlocuteurs.length > 1 ? "s" : ""} · {ok} identifié{ok > 1 ? "s" : ""}
+            {site.budgetAnnuel ? ` · ${Number(site.budgetAnnuel).toLocaleString("fr-FR")} €` : ""}
+          </div>
+        </div>
+        <button onClick={e => { e.stopPropagation(); onDel(); }} style={{ background: "transparent", border: "none", color: "#374151", cursor: "pointer", fontSize: 15 }}>✕</button>
+      </div>
+
+      {open && (
+        <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <Field label="Nom du site" value={site.nom} onChange={v => onChange({ ...site, nom: v })} placeholder="Site de Lyon" />
+            <Field label="Adresse / Ville" value={site.adresse} onChange={v => onChange({ ...site, adresse: v })} placeholder="69000 Lyon" />
+            <DropField label="Site connu ?" value={site.statutSite} onChange={v => onChange({ ...site, statutSite: v })} options={STATUS_SITE} />
+            <Field label="Budget annuel (€)" type="number" value={site.budgetAnnuel} onChange={v => onChange({ ...site, budgetAnnuel: v })} placeholder="45 000" />
+          </div>
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <span style={{ fontSize: 10, letterSpacing: 2, color: "#4b5563", textTransform: "uppercase", fontFamily: "monospace" }}>Interlocuteurs</span>
+              <button onClick={addInter} style={{ background: "#0c2a1e", border: "1px solid #22c55e30", borderRadius: 6, padding: "4px 12px", color: "#4ade80", cursor: "pointer", fontSize: 12, fontFamily: "monospace" }}>+ Ajouter</button>
+            </div>
+            {site.interlocuteurs.length === 0
+              ? <div style={{ color: "#374151", fontSize: 12, fontStyle: "italic", padding: "10px 0", textAlign: "center" }}>Aucun interlocuteur — cliquez sur Ajouter</div>
+              : <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                  {site.interlocuteurs.map((inter, i) => (
+                    <InterRow key={inter.id} inter={inter} onChange={v => upInter(i, v)} onDel={() => delInter(i)} />
+                  ))}
+                </div>
+            }
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Agence Card ─────────────────────────────────────────────────────────────
+function AgenceCard({ agence, onChange, onDel }) {
+  const [open, setOpen] = useState(true);
+  const upSite = (i, val) => { const s = [...agence.sites]; s[i] = val; onChange({ ...agence, sites: s }); };
+  const addSite = () => onChange({ ...agence, sites: [...agence.sites, newSite()] });
+  const delSite = i => onChange({ ...agence, sites: agence.sites.filter((_, j) => j !== i) });
+
+  const totSites = agence.sites.length;
+  const sitesOk = agence.sites.filter(s => s.statutSite === "Connu ✓").length;
+  const budget = agence.sites.reduce((a, s) => a + (parseFloat(s.budgetAnnuel) || 0), 0);
+  const totInter = agence.sites.reduce((a, s) => a + s.interlocuteurs.length, 0);
+  const interOk = agence.sites.reduce((a, s) => a + s.interlocuteurs.filter(x => x.statut === "Identifié ✓").length, 0);
+
+  const pct = totSites === 0 ? 0 : Math.round(
+    (sitesOk / totSites) * 40 + (interOk / Math.max(totInter, 1)) * 40 +
+    (agence.sites.filter(s => s.budgetAnnuel).length / totSites) * 20
+  );
+  const pctColor = pct >= 80 ? "#22c55e" : pct >= 40 ? "#fbbf24" : "#f87171";
+
+  return (
+    <div style={{ border: "1px solid #1f2937", borderRadius: 14, overflow: "hidden", background: "#060a12", marginBottom: 16 }}>
+      <div style={{ background: "linear-gradient(135deg,#0d1520,#111827)", padding: "16px 20px" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 14, flexWrap: "wrap" }}>
+          <div onClick={() => setOpen(o => !o)} style={{ flex: 1, cursor: "pointer", userSelect: "none", display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ color: "#4b5563", fontSize: 16 }}>{open ? "▾" : "▸"}</span>
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <span style={{ fontFamily: "Georgia, serif", fontSize: 18, color: "#f9fafb" }}>{agence.nom || "Nouvelle agence"}</span>
+                {agence.refAC && <span style={{ fontSize: 11, fontFamily: "monospace", color: "#818cf8", background: "#818cf815", border: "1px solid #818cf830", padding: "2px 9px", borderRadius: 20 }}>AC · {agence.refAC}</span>}
+              </div>
+              <div style={{ fontSize: 11, color: "#374151", fontFamily: "monospace", marginTop: 3 }}>
+                {totSites} site{totSites !== 1 ? "s" : ""} · {sitesOk} connu{sitesOk !== 1 ? "s" : ""}
+                {" · "}{totInter} interlocuteur{totInter !== 1 ? "s" : ""}
+                {budget > 0 ? ` · ${budget.toLocaleString("fr-FR")} €` : ""}
+              </div>
+            </div>
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 24, fontWeight: "bold", color: pctColor, lineHeight: 1 }}>{pct}%</div>
+            <div style={{ fontSize: 9, color: "#4b5563", fontFamily: "monospace", marginBottom: 4 }}>complété</div>
+            <div style={{ background: "#ffffff10", borderRadius: 99, height: 4, width: 72 }}>
+              <div style={{ width: `${pct}%`, height: "100%", background: pctColor, borderRadius: 99, transition: "width .4s" }} />
+            </div>
+          </div>
+          <button onClick={onDel} style={{ background: "#1c0a0a", border: "1px solid #f8717130", borderRadius: 8, padding: "7px 13px", color: "#f87171", cursor: "pointer", fontSize: 12 }}>Supprimer</button>
+        </div>
+      </div>
+
+      {open && (
+        <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <Field label="Nom de l'agence" value={agence.nom} onChange={v => onChange({ ...agence, nom: v })} placeholder="Agence ABC" />
+            <Field label="Référence accord cadre" value={agence.refAC} onChange={v => onChange({ ...agence, refAC: v })} placeholder="AC-2024-042" />
+          </div>
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <span style={{ fontSize: 10, letterSpacing: 2, color: "#4b5563", textTransform: "uppercase", fontFamily: "monospace" }}>Sites rattachés ({totSites})</span>
+              <button onClick={addSite} style={{ background: "#0c2a1e", border: "1px solid #22c55e30", borderRadius: 8, padding: "6px 14px", color: "#4ade80", cursor: "pointer", fontSize: 13, fontFamily: "Georgia, serif" }}>+ Ajouter un site</button>
+            </div>
+            {agence.sites.length === 0
+              ? <div style={{ color: "#1f2937", fontSize: 13, fontStyle: "italic", padding: 16, background: "#0d1117", borderRadius: 10, textAlign: "center", border: "1px dashed #1f2937" }}>Aucun site — cliquez sur « Ajouter un site »</div>
+              : <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {agence.sites.map((site, i) => (
+                    <SiteCard key={site.id} site={site} idx={i} onChange={v => upSite(i, v)} onDel={() => delSite(i)} />
+                  ))}
+                </div>
+            }
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Excel Export ─────────────────────────────────────────────────────────────
+function exportExcel(agences) {
+  const wb = XLSX.utils.book_new();
+
+  // ── Feuille GUIDE ──
+  const guideRows = [
+    ["SUIVI ACCORDS CADRE — GUIDE D'UTILISATION"],
+    [""],
+    ["CONSIGNES DE SAISIE"],
+    ["Nom de l'agence", "Indiquez le nom exact de votre agence"],
+    ["Référence accord cadre", "Ex : AC-2024-042"],
+    ["Nom du site", "Un site = une ligne"],
+    ["Site connu ?", "Connu ✓ / À confirmer / Inconnu"],
+    ["Budget annuel (€)", "Montant estimé dépensé annuellement par le site"],
+    ["Interlocuteur", "Nom, poste, email et téléphone du contact sur site"],
+    ["Statut interlocuteur", "Identifié ✓ / En cours / Non identifié"],
+    [""],
+    ["Ce fichier a été généré depuis le tableau de bord interactif Accords Cadre."],
+  ];
+  const wsGuide = XLSX.utils.aoa_to_sheet(guideRows);
+  wsGuide["!cols"] = [{ wch: 30 }, { wch: 60 }];
+  XLSX.utils.book_append_sheet(wb, wsGuide, "📋 Guide");
+
+  // ── Feuille DONNÉES ──
+  const headers = ["Agence", "Réf. Accord Cadre", "Site", "Adresse", "Site connu ?", "Budget annuel (€)", "Interlocuteur", "Poste", "Email", "Téléphone", "Statut interlocuteur"];
+  const rows = [headers];
+
+  agences.forEach(agence => {
+    if (agence.sites.length === 0) {
+      rows.push([agence.nom, agence.refAC, "", "", "", "", "", "", "", "", ""]);
+    } else {
+      agence.sites.forEach((site, si) => {
+        if (site.interlocuteurs.length === 0) {
+          rows.push([
+            si === 0 ? agence.nom : "",
+            si === 0 ? agence.refAC : "",
+            site.nom, site.adresse, site.statutSite,
+            site.budgetAnnuel ? parseFloat(site.budgetAnnuel) : "",
+            "", "", "", "", ""
+          ]);
+        } else {
+          site.interlocuteurs.forEach((inter, ii) => {
+            rows.push([
+              si === 0 && ii === 0 ? agence.nom : "",
+              si === 0 && ii === 0 ? agence.refAC : "",
+              ii === 0 ? site.nom : "",
+              ii === 0 ? site.adresse : "",
+              ii === 0 ? site.statutSite : "",
+              ii === 0 && site.budgetAnnuel ? parseFloat(site.budgetAnnuel) : "",
+              inter.nom, inter.poste, inter.email, inter.telephone, inter.statut
+            ]);
+          });
+        }
+      });
+    }
+  });
+
+  const wsData = XLSX.utils.aoa_to_sheet(rows);
+  wsData["!cols"] = [22,20,22,20,14,16,22,18,28,16,18].map(w => ({ wch: w }));
+  XLSX.utils.book_append_sheet(wb, wsData, "📝 Données");
+
+  // ── Feuille SYNTHÈSE ──
+  const budgetTotal = agences.reduce((a, ag) => a + ag.sites.reduce((b, s) => b + (parseFloat(s.budgetAnnuel) || 0), 0), 0);
+  const totalSites = agences.reduce((a, ag) => a + ag.sites.length, 0);
+  const sitesConnus = agences.reduce((a, ag) => a + ag.sites.filter(s => s.statutSite === "Connu ✓").length, 0);
+  const totalInter = agences.reduce((a, ag) => a + ag.sites.reduce((b, s) => b + s.interlocuteurs.length, 0), 0);
+  const interOk = agences.reduce((a, ag) => a + ag.sites.reduce((b, s) => b + s.interlocuteurs.filter(x => x.statut === "Identifié ✓").length, 0), 0);
+
+  const synthRows = [
+    ["SYNTHÈSE CONSOLIDÉE"],
+    [""],
+    ["Indicateur", "Valeur"],
+    ["Nombre d'agences", agences.length],
+    ["Nombre de sites total", totalSites],
+    ["Sites connus ✓", sitesConnus],
+    ["Sites à confirmer", agences.reduce((a, ag) => a + ag.sites.filter(s => s.statutSite === "À confirmer").length, 0)],
+    ["Sites inconnus", agences.reduce((a, ag) => a + ag.sites.filter(s => s.statutSite === "Inconnu").length, 0)],
+    ["Interlocuteurs total", totalInter],
+    ["Interlocuteurs identifiés ✓", interOk],
+    ["Budget total annuel (€)", budgetTotal],
+  ];
+  const wsSynth = XLSX.utils.aoa_to_sheet(synthRows);
+  wsSynth["!cols"] = [{ wch: 30 }, { wch: 20 }];
+  XLSX.utils.book_append_sheet(wb, wsSynth, "📊 Synthèse");
+
+  XLSX.writeFile(wb, "suivi_accords_cadre.xlsx");
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
+export default function App() {
+  const [agences, setAgences] = useState([]);
+  const [view, setView] = useState("saisie");
+
+  const addAgence = () => setAgences(p => [...p, newAgence()]);
+  const updAgence = (i, v) => setAgences(p => { const a = [...p]; a[i] = v; return a; });
+  const delAgence = i => setAgences(p => p.filter((_, j) => j !== i));
+
+  // Global stats
+  const totalSites = agences.reduce((a, ag) => a + ag.sites.length, 0);
+  const sitesOk = agences.reduce((a, ag) => a + ag.sites.filter(s => s.statutSite === "Connu ✓").length, 0);
+  const budget = agences.reduce((a, ag) => a + ag.sites.reduce((b, s) => b + (parseFloat(s.budgetAnnuel) || 0), 0), 0);
+  const totalInter = agences.reduce((a, ag) => a + ag.sites.reduce((b, s) => b + s.interlocuteurs.length, 0), 0);
+  const interOk = agences.reduce((a, ag) => a + ag.sites.reduce((b, s) => b + s.interlocuteurs.filter(x => x.statut === "Identifié ✓").length, 0), 0);
+
+  return (
+    <div style={{ fontFamily: "Georgia, serif", background: "#030712", minHeight: "100vh", color: "#f9fafb" }}>
+      {/* ── Header ── */}
+      <div style={{ background: "linear-gradient(135deg,#060a12 0%,#0d1520 100%)", borderBottom: "1px solid #1f2937", padding: "24px 32px" }}>
+        <div style={{ maxWidth: 1020, margin: "0 auto" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 20 }}>
+            <div>
+              <div style={{ fontSize: 10, letterSpacing: 4, color: "#6366f1", textTransform: "uppercase", fontFamily: "monospace", marginBottom: 6 }}>Accords cadre · Suivi agences</div>
+              <h1 style={{ margin: 0, fontSize: 28, fontWeight: "normal" }}>Tableau de bord agences</h1>
+              <p style={{ margin: "5px 0 0", color: "#4b5563", fontSize: 14 }}>Saisissez vos données et exportez en Excel en un clic</p>
+            </div>
+
+            {agences.length > 0 && (
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <KPI label="Agences" value={agences.length} color="#818cf8" />
+                <KPI label="Sites" value={`${sitesOk}/${totalSites}`} sub="connus" color={sitesOk === totalSites && totalSites > 0 ? "#22c55e" : "#fbbf24"} />
+                <KPI label="Interlocuteurs" value={`${interOk}/${totalInter}`} sub="identifiés" color={interOk === totalInter && totalInter > 0 ? "#22c55e" : "#fbbf24"} />
+                <KPI label="Budget total" value={budget > 0 ? `${(budget / 1000).toFixed(0)}k €` : "—"} color="#34d399" />
+              </div>
+            )}
+          </div>
+
+          {/* Tabs + Export */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 20, flexWrap: "wrap", gap: 10 }}>
+            <div style={{ display: "flex", gap: 4 }}>
+              {[["saisie", "✏️ Saisie"], ["synthese", "📊 Synthèse"]].map(([id, label]) => (
+                <button key={id} onClick={() => setView(id)} style={{
+                  padding: "7px 18px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 13,
+                  background: view === id ? "#6366f1" : "#0d1117", color: view === id ? "#fff" : "#4b5563",
+                  fontFamily: "Georgia, serif", transition: "all .2s",
+                }}>{label}</button>
+              ))}
+            </div>
+
+            {agences.length > 0 && (
+              <button onClick={() => exportExcel(agences)} style={{
+                background: "linear-gradient(135deg,#166534,#14532d)", border: "1px solid #22c55e40",
+                borderRadius: 9, padding: "9px 20px", color: "#4ade80", cursor: "pointer",
+                fontSize: 14, fontFamily: "Georgia, serif", display: "flex", alignItems: "center", gap: 8,
+                boxShadow: "0 0 16px #22c55e15", transition: "all .2s",
+              }}>
+                <span style={{ fontSize: 16 }}>⬇</span> Exporter en Excel
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Content ── */}
+      <div style={{ maxWidth: 1020, margin: "0 auto", padding: "28px 32px" }}>
+
+        {/* SAISIE */}
+        {view === "saisie" && (
+          <>
+            {agences.length === 0 ? (
+              <div style={{ textAlign: "center", padding: "70px 20px" }}>
+                <div style={{ fontSize: 52, marginBottom: 16 }}>🏢</div>
+                <div style={{ fontSize: 18, color: "#374151", marginBottom: 6 }}>Aucune agence renseignée</div>
+                <div style={{ fontSize: 13, color: "#1f2937", marginBottom: 28 }}>Commencez par ajouter une agence</div>
+                <button onClick={addAgence} style={{ background: "#6366f1", border: "none", borderRadius: 10, padding: "12px 28px", color: "#fff", cursor: "pointer", fontSize: 15, fontFamily: "Georgia, serif" }}>
+                  + Ajouter une agence
+                </button>
+              </div>
+            ) : (
+              <>
+                {agences.map((ag, i) => (
+                  <AgenceCard key={ag.id} agence={ag} onChange={v => updAgence(i, v)} onDel={() => delAgence(i)} />
+                ))}
+                <button onClick={addAgence} style={{ width: "100%", background: "#6366f108", border: "1px dashed #6366f140", borderRadius: 12, padding: "13px", color: "#6366f1", cursor: "pointer", fontSize: 14, fontFamily: "Georgia, serif" }}>
+                  + Ajouter une agence
+                </button>
+              </>
+            )}
+          </>
+        )}
+
+        {/* SYNTHÈSE */}
+        {view === "synthese" && (
+          <>
+            {agences.length === 0 ? (
+              <div style={{ textAlign: "center", color: "#374151", padding: 60, fontSize: 14 }}>
+                Aucune donnée — commencez par saisir des agences.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {/* Jauges */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 10, marginBottom: 6 }}>
+                  {[
+                    { label: "Sites connus", val: sitesOk, total: totalSites, color: "#22c55e" },
+                    { label: "Interlocuteurs identifiés", val: interOk, total: totalInter, color: "#60a5fa" },
+                    { label: "Budgets renseignés", val: agences.reduce((a, ag) => a + ag.sites.filter(s => s.budgetAnnuel).length, 0), total: totalSites, color: "#fbbf24" },
+                  ].map(s => (
+                    <div key={s.label} style={{ background: "#0d1117", border: "1px solid #1f2937", borderRadius: 12, padding: "14px 18px" }}>
+                      <div style={{ fontSize: 10, color: "#4b5563", fontFamily: "monospace", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{s.label}</div>
+                      <div style={{ fontSize: 26, color: s.color, fontWeight: "bold" }}>{s.val}<span style={{ fontSize: 15, color: "#374151" }}>/{s.total}</span></div>
+                      <div style={{ background: "#1f2937", borderRadius: 99, height: 4, marginTop: 8 }}>
+                        <div style={{ width: `${s.total > 0 ? Math.round(s.val / s.total * 100) : 0}%`, height: "100%", background: s.color, borderRadius: 99, transition: "width .4s" }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Table */}
+                <div style={{ background: "#0d1117", border: "1px solid #1f2937", borderRadius: 12, overflow: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ background: "#111827" }}>
+                        {["Agence","Réf. AC","Site","Statut site","Budget (€)","Interlocuteurs","Statut"].map(h => (
+                          <th key={h} style={{ padding: "11px 13px", textAlign: "left", fontSize: 10, letterSpacing: 2, color: "#4b5563", fontFamily: "monospace", fontWeight: "normal", textTransform: "uppercase", borderBottom: "1px solid #1f2937", whiteSpace: "nowrap" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {agences.flatMap((ag, ai) =>
+                        ag.sites.length === 0
+                          ? [<tr key={`empty-${ag.id}`} style={{ borderBottom: "1px solid #0d1117" }}>
+                              <td style={{ padding: "9px 13px", color: "#e5e7eb", fontFamily: "Georgia, serif" }}>{ag.nom || "—"}</td>
+                              <td style={{ padding: "9px 13px", color: "#4b5563", fontFamily: "monospace", fontSize: 11 }}>{ag.refAC || "—"}</td>
+                              <td colSpan={5} style={{ padding: "9px 13px", color: "#1f2937", fontStyle: "italic" }}>Aucun site</td>
+                            </tr>]
+                          : ag.sites.map((site, si) => {
+                              const iOk = site.interlocuteurs.filter(x => x.statut === "Identifié ✓").length;
+                              const allOk = iOk === site.interlocuteurs.length && site.interlocuteurs.length > 0;
+                              return (
+                                <tr key={site.id} style={{ borderBottom: "1px solid #0d1117", background: si % 2 === 0 ? "transparent" : "#060a12" }}>
+                                  <td style={{ padding: "9px 13px", color: "#f9fafb", fontFamily: "Georgia, serif" }}>{si === 0 ? (ag.nom || "—") : ""}</td>
+                                  <td style={{ padding: "9px 13px", color: "#4b5563", fontFamily: "monospace", fontSize: 11 }}>{si === 0 ? (ag.refAC || "—") : ""}</td>
+                                  <td style={{ padding: "9px 13px", color: "#e5e7eb" }}>
+                                    {site.nom || "—"}
+                                    {site.adresse && <span style={{ color: "#374151", fontSize: 11 }}> · {site.adresse}</span>}
+                                  </td>
+                                  <td style={{ padding: "9px 13px" }}><Pill label={site.statutSite} /></td>
+                                  <td style={{ padding: "9px 13px", color: site.budgetAnnuel ? "#34d399" : "#374151", fontFamily: "monospace" }}>
+                                    {site.budgetAnnuel ? Number(site.budgetAnnuel).toLocaleString("fr-FR") + " €" : "—"}
+                                  </td>
+                                  <td style={{ padding: "9px 13px", color: "#6b7280", fontFamily: "monospace" }}>{iOk}/{site.interlocuteurs.length}</td>
+                                  <td style={{ padding: "9px 13px" }}>
+                                    <Pill label={allOk ? "Identifié ✓" : site.interlocuteurs.length === 0 ? "Non identifié" : "En cours"} />
+                                  </td>
+                                </tr>
+                              );
+                            })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {budget > 0 && (
+                  <div style={{ background: "#052e16", border: "1px solid #22c55e30", borderRadius: 12, padding: "14px 20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ color: "#4b5563", fontSize: 13 }}>Budget total consolidé</span>
+                    <span style={{ color: "#34d399", fontSize: 22, fontFamily: "monospace", fontWeight: "bold" }}>{budget.toLocaleString("fr-FR")} €</span>
+                  </div>
+                )}
+
+                <button onClick={() => exportExcel(agences)} style={{
+                  alignSelf: "flex-end", background: "linear-gradient(135deg,#166534,#14532d)",
+                  border: "1px solid #22c55e40", borderRadius: 9, padding: "10px 22px",
+                  color: "#4ade80", cursor: "pointer", fontSize: 14, fontFamily: "Georgia, serif",
+                  display: "flex", alignItems: "center", gap: 8,
+                }}>
+                  <span>⬇</span> Exporter en Excel
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      <style>{`
+        input:focus, select:focus { border-color: #6366f1 !important; box-shadow: 0 0 0 2px #6366f120; }
+        button:hover { opacity: .88; }
+      `}</style>
+    </div>
+  );
+}
